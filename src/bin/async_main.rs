@@ -7,11 +7,16 @@
 //! - MOSI => GPIO12
 //! - CS   => GPIO13
 //!
+//! 13 -> 21
+//! 12 -> 22
+//! 11 -> 35
+//! 10 -> 27
+//! 
 //! The following wiring is assumed for the (bitbang) master:
-//! - SCLK => GPIO4
-//! - MISO => GPIO5
-//! - MOSI => GPIO6
-//! - CS   => GPIO7
+//! - SCLK => GPIO27
+//! - MISO => GPIO35
+//! - MOSI => GPIO22
+//! - CS   => GPIO21
 //!
 //! Depending on your target and the board you are using you have to change the
 //! pins.
@@ -30,13 +35,17 @@
 #![no_std]
 #![no_main]
 
-
-
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::Watch};
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
-use esp_hal::{peripheral::Peripheral, timer::timg::TimerGroup};
+use esp_hal::{
+    gpio::{Event, Io},
+    handler,
+    peripheral::Peripheral,
+    ram,
+    timer::timg::TimerGroup,
+};
 
 use esp_backtrace as _;
 use esp_hal::{
@@ -44,105 +53,58 @@ use esp_hal::{
     dma_buffers,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     main,
-    spi::{slave::Spi, Mode},
+    spi,
 };
 use esp_println::println;
-static mut MASTER_SEND: [u8; 32000] = [0; 32000];
-static mut MASTER_RECEIVE: [u8; 32000] = [0; 32000];
 
-static SIGNAL: Watch<CriticalSectionRawMutex, bool, 4> = Watch::new();
+static mut MASTER_RECEIVE: [u8; 32000] = [0; 32000];
+static mut MASTER_SEND: [u8; 32000] = [0; 32000];
+
+
+
+
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
-    
-
-
-
     println!("SPI slave loopback test using DMA");
     println!("This example transfers data via SPI.");
 
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
-
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
-    
-    let mut master_sclk = Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default());
+
+
+
+    let mut master_sclk = Output::new(peripherals.GPIO27, Level::Low, OutputConfig::default());
     let master_miso = Input::new(
-        peripherals.GPIO5,
+        peripherals.GPIO35,
         InputConfig::default().with_pull(Pull::None),
     );
-    let mut master_mosi = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
-    let mut master_cs = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
+    let mut master_mosi = Output::new(peripherals.GPIO22, Level::Low, OutputConfig::default());
+    let mut master_cs = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
 
-    let slave_sclk = peripherals.GPIO10;
-    let slave_miso = peripherals.GPIO11;
-    let slave_mosi = peripherals.GPIO12;
-    let slave_cs = peripherals.GPIO13;
 
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "esp32s2")] {
-            let dma_channel = peripherals.DMA_SPI2;
-        } else {
-            let dma_channel = peripherals.DMA_CH0;
-        }
-    }
-    let slave_cs2;
-    unsafe{
-        slave_cs2 = slave_cs.clone_unchecked();
-    }
+    let mut master_send = unsafe { &mut MASTER_SEND };
+    let mut master_receive = unsafe { &mut MASTER_RECEIVE };
     
-
-    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) = dma_buffers!(32000);
-
-    let mut spi = Spi::new(peripherals.SPI2, Mode::_0)
-        .with_sck(slave_sclk)
-        .with_mosi(slave_mosi)
-        .with_miso(slave_miso)
-        .with_cs(slave_cs2)
-        .with_dma(dma_channel, rx_descriptors, tx_descriptors);
-
-    let delay = Delay::new();
-    
-    // DMA buffer require a static life-time
-    let master_send = unsafe { &mut MASTER_SEND };
-    let master_receive = unsafe { &mut MASTER_RECEIVE };
-    let mut slave_send = tx_buffer;
-    let mut slave_receive = rx_buffer;
     let mut i = 0;
 
     // Initialize master_send with a simple pattern
-    master_send.fill(0xAA);  // Fill with pattern 10101010
+    master_send.fill(0xAA); // Fill with pattern 10101010
+
+    // Set up the CS interrupt
+    spawner.spawn(get_slave_dma_buffer()).unwrap();
 
 
-    
-
-
-    let config = InputConfig::default().with_pull(Pull::Up);
-    let mut cs_interrupt: Input<'_> = Input::new(slave_cs, config);
-
-    spawner
-        .spawn(get_slave_dma_buffer(cs_interrupt, slave_receive))
-        .unwrap();
-    let mut recv = SIGNAL.receiver().unwrap();
     loop {
         // Update a few key positions to track iterations
-        master_send[0] = i;                       // First byte shows iteration count
-        master_send[1] = 0xBB;                    // Fixed marker
-        master_send[2] = 0xCC;                    // Fixed marker
-        master_send[master_send.len() - 1] = i;   // Last byte also shows iteration count
+        master_send[0] = i; // First byte shows iteration count
+        master_send[1] = 0xBB; // Fixed marker
+        master_send[2] = 0xCC; // Fixed marker
+        master_send[master_send.len() - 1] = i; // Last byte also shows iteration count
+
+        i = i.wrapping_add(1); // Increment counter, wrapping at 255
         
-        i = i.wrapping_add(1);  // Increment counter, wrapping at 255
-        slave_receive.fill(0xff);
-
-        println!("Do `read`");
-        slave_receive.fill(0xff);
-        let transfer;
-
-        transfer = spi.read(&mut slave_receive).unwrap();
-
-
-        
-
 
         bitbang_master(
             master_send,
@@ -151,19 +113,16 @@ async fn main(spawner: Spawner) {
             &mut master_mosi,
             &mut master_sclk,
             &master_miso,
-        ).await;
-       
+        )
+        .await;
+    println!(
+        "sent stuff {:x?} .. {:x?}",
+        &master_send[..10],
+        &master_send[master_send.len() - 10..],
+    );
+        Timer::after(Duration::from_millis(5000)).await;
 
-        println!("pipoca");
-        recv.changed().await;
-        //transfer.wait().unwrap();
-        println!("doce");
         
-
-        // Add a delay between iterations
-        Timer::after(Duration::from_millis(1000)).await;
-
-        println!();
     }
 }
 
@@ -210,20 +169,19 @@ async fn bitbang_master(
     master_sclk.set_low();
 }
 
-
+// This task runs in the background and can be used to perform other operations
 #[embassy_executor::task]
-async fn get_slave_dma_buffer(mut cs_interrupt: Input<'static>, slave_receive_ptr: *const [u8]) {
-    let sender = SIGNAL.sender();
+async fn get_slave_dma_buffer() {
+
     loop {
-        println!("MORANGO");
-        cs_interrupt.wait_for(esp_hal::gpio::Event::AnyEdge).await;
-        println!("ABACATE");
-        let slave_receive = unsafe { &*slave_receive_ptr };
-        sender.send(true);
-        println!(
-            "slave got {:x?} .. {:x?}",
-            &slave_receive[..10],
-            &slave_receive[slave_receive.len() - 10..],
-        );
+        // Wait for a short duration between checks
+        Timer::after(Duration::from_millis(1000)).await;
+
+        // Print a message to show the task is running
+        println!("Just some background task...");
+
+        
     }
 }
+
+
