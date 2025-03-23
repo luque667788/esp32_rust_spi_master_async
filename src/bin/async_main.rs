@@ -58,8 +58,7 @@ use esp_hal::{
 };
 use esp_println::println;
 
-static mut MASTER_RECEIVE: [u8; 32000] = [0; 32000];
-static mut MASTER_SEND: [u8; 32000] = [0; 32000];
+
 
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
@@ -80,14 +79,11 @@ async fn main(spawner: Spawner) {
 
         */
     let mut master_cs = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
+
+
     
-    let mut master_send = unsafe { &mut MASTER_SEND };
-    let mut master_receive = unsafe { &mut MASTER_RECEIVE };
 
-    let mut i = 0;
 
-    // Initialize master_send with a simple pattern
-    master_send.fill(0xAA); // Fill with pattern 10101010
 
     // Set up the CS interrupt
     spawner.spawn(background_task()).unwrap();
@@ -105,28 +101,37 @@ async fn main(spawner: Spawner) {
     //.with_cs(master_cs)
     .into_async();
 
+    let mut i: u32 = 0;
+    let mut floats = [0.0; 512];
+    let mut buff: [u8; 2048] = [0; 2048];
     loop {
         // Update a few key positions to track iterations
-        master_send[0] = i; // First byte shows iteration count
-        master_send[1] = 0xBB; // Fixed marker
-        master_send[2] = 0xCC; // Fixed marker
-        master_send[master_send.len() - 1] = i; // Last byte also shows iteration count
+        // Create a simple pattern that changes each iteration
 
-        i = i.wrapping_add(1); // Increment counter, wrapping at 255
 
-        //write_data_spi_async(&mut master_spi, master_send, &mut master_cs).await.unwrap();
-        // Write data to SPI
-        master_cs.set_low();
-        master_spi.write(master_send).unwrap();
-        master_cs.set_high();
+        
+        // Fill the floats array with a simple pattern
+        //floats[i as usize % 512] = i as f32; // Update a float in the array
+
+        
+        
+        //let _bytes_written = float_to_bytes(&floats, 512,&mut buff);
+        buff[i as usize] = 0xFF; // Set the first byte to 0xFF
+        write_data_spi_async(&mut master_spi, &buff, &mut master_cs).await.unwrap();
+
         println!(
             "sent stuff {:x?} .. {:x?}",
-            &master_send[..10],
-            &master_send[master_send.len() - 10..],
+            &buff[..10],
+            &buff[buff.len() - 10..],
         );
+        buff = [0; 2048]; // Reset the buffer for the next iteration
         Timer::after(Duration::from_millis(5000)).await;
+
+        i = i.wrapping_add(1_u32); // Increment counter, wrapping at 255
     }
 }
+
+
 
 async fn write_data_spi_async(
     spi: &mut Spi<'_, esp_hal::Async>,
@@ -150,4 +155,21 @@ async fn background_task() {
         // Print a message to show the task is running
         println!("Just some background task...");
     }
+}
+
+//helper function that converts floats to bytes u8 in chunks of 512 floats
+fn float_to_bytes(floats: &[f32], chunk_size: usize, output: &mut [u8]) -> usize {
+    let mut bytes_written = 0;
+    for chunk in floats.chunks(chunk_size) {
+        for &float in chunk {
+            let float_bytes = float.to_le_bytes();
+            if bytes_written + float_bytes.len() <= output.len() {
+                output[bytes_written..bytes_written+float_bytes.len()].copy_from_slice(&float_bytes);
+                bytes_written += float_bytes.len();
+            } else {
+                break;
+            }
+        }
+    }
+    bytes_written
 }
