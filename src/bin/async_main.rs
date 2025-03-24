@@ -24,7 +24,7 @@ use esp_hal::{
 use esp_println::println;
 
 // Configuration constants
-const CHUNK_SIZE: usize = 512 * 4; // 2KB buffer size (512 float values)
+const CHUNK_SIZE: usize = 512 * 4; // 2KB buffer size (could hold 512 float values)
                                    // Ensure the CHUNK_SIZE matches the client code configuration
                                    // to prevent buffer overflow issues. 
 
@@ -53,7 +53,7 @@ async fn main(spawner: Spawner) {
     .unwrap()
     .with_sck(peripherals.GPIO27)
     .with_mosi(peripherals.GPIO22)
-    .with_miso(peripherals.GPIO35) // CS pin managed separately
+    .with_miso(peripherals.GPIO35) // CS pin managed separately, dont add it here
     .into_async();
 
     let mut tx_buffer = [0u8; CHUNK_SIZE];
@@ -73,27 +73,16 @@ async fn main(spawner: Spawner) {
         tx_buffer[2] = 0xFF;
         total_data_sent += tx_buffer.len();
 
-        // Debug data content - disabled during normal operation
-        // Output would be excessive at high data rates
-        // if tx_buffer.len() > 20 {
-        //     println!(
-        //         "Transmitted: beginning={:x?} ... end={:x?}",
-        //         &tx_buffer[..10],
-        //         &tx_buffer[tx_buffer.len() - 10..],
-        //     );
-        // } else {
-        //     println!("Transmitted: {:x?}", &tx_buffer);
-        // }
 
         // Wait 20ms between transmissions to achieve ~40Hz rate
-        // and approximately 82KB/sec throughput
+        // and approximately 82KB/sec data rate
         Timer::after(Duration::from_millis(20)).await;
 
         // Calculate and report performance metrics every 10 seconds
         let elapsed_time = start_time.elapsed().as_secs();
         if elapsed_time > 0 && elapsed_time % 10 == 0 && last_elapsed_time != elapsed_time {
             let data_rate =
-                total_data_sent as f64 / (start_time.elapsed().as_millis() as f64 / 1000.0);
+                total_data_sent as f64 / (start_time.elapsed().as_millis() as f64 / 1000.0); // (just for debugging) there might be some imprecision due to floating point division
             println!("Total data sent: {} bytes", total_data_sent);
             println!("Data rate: {:.2} bytes/second", data_rate);
             start_time = Instant::now(); // Reset timing reference
@@ -101,6 +90,20 @@ async fn main(spawner: Spawner) {
             last_elapsed_time = elapsed_time;
 
             tx_buffer[2] = 0xED; // Update marker byte after statistics reset
+
+
+        // Print data content (commented out for normal operation) -> at high data rates it is too much print output in the CMD
+        /*
+        if tx_buffer.len() > 20 {
+            println!(
+                "Transmitted: beginning={:x?} ... end={:x?}",
+                &tx_buffer[..10],
+                &tx_buffer[tx_buffer.len() - 10..],
+            );
+        } else {
+            println!("Transmitted: {:x?}", &tx_buffer);
+        }
+        */
         }
     }
 }
