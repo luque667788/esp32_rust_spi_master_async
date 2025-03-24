@@ -1,175 +1,144 @@
-//! SPI slave loopback test using DMA
+//! SPI Master Test with DMA
 //!
-//! The following wiring is assumed for the (bitbang) slave:
+//! Wiring connections:
 //!
+//! Slave side:
 //! - SCLK => GPIO10
 //! - MISO => GPIO11
 //! - MOSI => GPIO12
 //! - CS   => GPIO13
 //!
-//! 13 -> 21
-//! 12 -> 22
-//! 11 -> 35
-//! 10 -> 27
+//! Connection mapping:
+//! - 13 -> 21 (CS)
+//! - 12 -> 22 (MOSI)
+//! - 11 -> 35 (MISO)
+//! - 10 -> 27 (SCLK)
 //!
-//! The following wiring is assumed for the (bitbang) master:
+//! Master side:
 //! - SCLK => GPIO27
 //! - MISO => GPIO35
 //! - MOSI => GPIO22
 //! - CS   => GPIO21
 //!
-//! Depending on your target and the board you are using you have to change the
-//! pins.
-//!
-//! This example transfers data via SPI.
-//!
-//! Connect corresponding master and slave pins to see the outgoing data is read
-//! as incoming data. The master-side pins are chosen to make these connections
-//! easy for the barebones chip; all are immediate neighbors of the slave-side
-//! pins except SCLK. SCLK is between MOSI and VDD3P3_RTC on the barebones chip,
-//! so no immediate neighbor is available.
-
-//% CHIPS: esp32c2 esp32c3 esp32c6 esp32h2 esp32s2 esp32s3
-//% FEATURES: esp-hal/unstable
-
+//! This example demonstrates SPI communication using DMA with the ESP32.
 #![no_std]
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::Watch};
-use embassy_time::{Duration, Timer};
-use embedded_hal::digital::OutputPin;
+use embassy_time::{Duration, Timer, Instant};
+use embedded_hal_async::spi::SpiBus;
 use esp_backtrace as _;
 use esp_hal::{
-    gpio::{Event, Io},
-    handler,
-    peripheral::Peripheral,
-    ram,
-    spi::master::Spi,
+    gpio::{Level, Output, OutputConfig},
+    spi::{master::Spi, Error as SpiError},
     timer::timg::TimerGroup,
-};
-
-use esp_backtrace as _;
-use esp_hal::{
-    delay::Delay,
-    dma_buffers,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    main, spi,
 };
 use esp_println::println;
 
-
+// Configuration constants
+const CHUNK_SIZE: usize = 512 * 4; // 2KB buffer size 512 floats chunksize -> you can change this of course
+// make sure the CHUNK_SIZE in the client code is the same also
+// to avoid buffer overflows (supposely the esp-hal dma has its own SPI buffer but i asked in their matrix forum and it is not working reliably as i tested it also)
 
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
-    println!("SPI slave loopback test using DMA");
-    println!("This example transfers data via SPI.");
-
+   // Initialize peripherals
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
+    // Set up embassy time source
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
-    /*
-        let mut master_sclk = Output::new(peripherals.GPIO27, Level::Low, OutputConfig::default());
-        let master_miso = Input::new(
-            peripherals.GPIO35,
-            InputConfig::default().with_pull(Pull::None),
-        );
-        let mut master_mosi = Output::new(peripherals.GPIO22, Level::Low, OutputConfig::default());
 
-        */
-    let mut master_cs = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
+    // Configure GPIO for chip select
+    let mut cs_pin = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
 
-
-    
-
-
-
-    // Set up the CS interrupt
+    // Start background monitoring task
     spawner.spawn(background_task()).unwrap();
 
-    let mut master_spi = Spi::new(
+    // Configure SPI master
+    let mut spi_master = Spi::new(
         peripherals.SPI3,
         esp_hal::spi::master::Config::default()
-            .with_frequency(esp_hal::time::Rate::from_khz(100))
+            .with_frequency(esp_hal::time::Rate::from_mhz(60))
             .with_mode(esp_hal::spi::Mode::_0),
     )
     .unwrap()
     .with_sck(peripherals.GPIO27)
     .with_mosi(peripherals.GPIO22)
-    .with_miso(peripherals.GPIO35)
-    //.with_cs(master_cs)
+    .with_miso(peripherals.GPIO35) // CS pin handled manually
     .into_async();
 
-    let mut i: u32 = 0;
-    let mut floats = [0.0; 512];
-    let mut buff: [u8; 2048] = [0; 2048];
+    let mut tx_buffer = [0u8; CHUNK_SIZE];
+    let mut total_data_sent = 0;
+    let mut start_time = Instant::now();
+    let mut last_elapsed_time = 0_u64;
+
+    tx_buffer[2] = 0xFF;// just some marker to check in the slave if we are getting the right data
+    // Main  loop
     loop {
-        // Update a few key positions to track iterations
-        // Create a simple pattern that changes each iteration
 
-
+        // Mark current position in buffer (just for testing generating some data and the sending it)
         
-        // Fill the floats array with a simple pattern
-        //floats[i as usize % 512] = i as f32; // Update a float in the array
 
+        // Send data via SPI
+        transmit_data(&mut spi_master, &tx_buffer, &mut cs_pin)
+            .await
+            .unwrap();
+
+
+        tx_buffer[2] = 0xFF;
+        total_data_sent += tx_buffer.len();
+
+
+
+        // Log transmitted data -> comment this out because at this data rate it will be too much prints
+        // if tx_buffer.len() > 20 {
+        //     println!(
+        //         "Transmitted: beginning={:x?} ... end={:x?}",
+        //         &tx_buffer[..10],
+        //         &tx_buffer[tx_buffer.len() - 10..],
+        //     );
+        // } else {
+        //     println!("Transmitted: {:x?}", &tx_buffer);
+        // }
         
-        
-        //let _bytes_written = float_to_bytes(&floats, 512,&mut buff);
-        buff[i as usize] = 0xFF; // Set the first byte to 0xFF
-        write_data_spi_async(&mut master_spi, &buff, &mut master_cs).await.unwrap();
+        Timer::after(Duration::from_millis(20)).await; // Wait for 20ms before sending the next chunk, so we roughly aproach 40Hz and the 82 kilobytes per second
 
-        println!(
-            "sent stuff {:x?} .. {:x?}",
-            &buff[..10],
-            &buff[buff.len() - 10..],
-        );
-        buff = [0; 2048]; // Reset the buffer for the next iteration
-        Timer::after(Duration::from_millis(5000)).await;
+        // Calculate and print data rate every second
+        let elapsed_time = start_time.elapsed().as_secs();
+        if elapsed_time > 0 && elapsed_time % 10 == 0 && last_elapsed_time != elapsed_time {
+            
+            let data_rate = total_data_sent as f64 / (start_time.elapsed().as_millis() as f64 / 1000.0);
+            println!("Total data sent: {} bytes", total_data_sent);
+            println!("Data rate: {:.2} bytes/second", data_rate);
+            start_time = Instant::now(); // Reset start time
+            total_data_sent = 0; // Reset total data sent
+            // Reset elapsed time
+            last_elapsed_time = elapsed_time;
 
-        i = i.wrapping_add(1_u32); // Increment counter, wrapping at 255
+            tx_buffer[2] = 0xED;
+        }
     }
 }
 
-
-
-async fn write_data_spi_async(
+/// Transmits data over SPI with proper CS handling
+async fn transmit_data(
     spi: &mut Spi<'_, esp_hal::Async>,
-    data: &[u8], cs: &mut Output<'_>,
-) -> Result<(), spi::Error> {
-    // Write data to SPI
-    println!("cs is low now");
-    cs.set_low(); // Set CS low to start transmission
-    embedded_hal_async::spi::SpiBus::write(spi, data).await?;
-    cs.set_high(); // Set CS high to end transmission
-    Ok(()) // Return Ok to satisfy the Result return type
+    data: &[u8],
+    cs: &mut Output<'_>,
+) -> Result<(), SpiError> {
+    //println!("Beginning SPI transmission (CS active)");
+    cs.set_low(); // Activate chip select
+    SpiBus::write(spi, data).await?;//non blocking write
+    cs.set_high(); // Deactivate chip select
+    Ok(())
 }
 
-// This task runs in the background and can be used to perform other operations
+/// Background monitoring task
 #[embassy_executor::task]
 async fn background_task() {
     loop {
-        // Wait for a short duration between checks
         Timer::after(Duration::from_millis(1000)).await;
-
-        // Print a message to show the task is running
-        println!("Just some background task...");
+        println!("Background monitor: system active");
     }
-}
-
-//helper function that converts floats to bytes u8 in chunks of 512 floats
-fn float_to_bytes(floats: &[f32], chunk_size: usize, output: &mut [u8]) -> usize {
-    let mut bytes_written = 0;
-    for chunk in floats.chunks(chunk_size) {
-        for &float in chunk {
-            let float_bytes = float.to_le_bytes();
-            if bytes_written + float_bytes.len() <= output.len() {
-                output[bytes_written..bytes_written+float_bytes.len()].copy_from_slice(&float_bytes);
-                bytes_written += float_bytes.len();
-            } else {
-                break;
-            }
-        }
-    }
-    bytes_written
 }
