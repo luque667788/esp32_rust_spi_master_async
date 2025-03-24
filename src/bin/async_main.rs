@@ -62,7 +62,7 @@ async fn main(spawner: Spawner) {
     let mut last_elapsed_time = 0_u64;
 
     tx_buffer[2] = 0xFF; // Marker byte to verify correct data reception at the slave
-
+    
     // Main transmission loop
     loop {
         // Transmit data chunk via SPI
