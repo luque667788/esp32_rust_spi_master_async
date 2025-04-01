@@ -1,6 +1,6 @@
 # ESP32 SPI Master Test
 
-This project demonstrates Master SPI communication on ESP32 microcontrollers using the Embassy async runtime in a `no_std` environment. It is designed to be only used with and test the slave implementation provided on the other folder.
+This project demonstrates Master SPI communication on ESP32 microcontrollers using the Embassy async runtime in a `no_std` environment. It is designed to be only used with and test the slave implementation provided on the other corresponding repo.
 
 ## Hardware Configuration
 
@@ -42,5 +42,3 @@ Remember to change to your specific ESP32 version in the `Cargo.toml` file and c
 
 See the source code comments and the slave implementation docs for more information.
 
-
-Feel free to contact me if you have any issues, doubts, or questions!
